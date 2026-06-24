@@ -1,4 +1,4 @@
-module github.com/p2p-b2b/ratelimiter
+module github.com/slashdevops/ratelimiter
 
 go 1.24.2
 

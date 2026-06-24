@@ -1,6 +1,6 @@
 # ratelimiter
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/p2p-b2b/ratelimiter.svg)](https://pkg.go.dev/github.com/p2p-b2b/ratelimiter)
+[![Go Reference](https://pkg.go.dev/badge/github.com/slashdevops/ratelimiter.svg)](https://pkg.go.dev/github.com/slashdevops/ratelimiter)
 
 ## Introduction
 
@@ -25,7 +25,7 @@ For advanced use cases, you can provide your own storage backend by implementing
 ## Installation
 
 ```bash
-go get github.com/p2p-b2b/ratelimiter
+go get github.com/slashdevops/ratelimiter
 ```
 
 ## Core Concepts
@@ -44,7 +44,7 @@ import (
   "fmt"
   "time"
 
-  "github.com/p2p-b2b/ratelimiter"
+  "github.com/slashdevops/ratelimiter"
   "golang.org/x/time/rate"
 )
 
@@ -103,7 +103,7 @@ import (
   "strings"
   "time"
 
-  "github.com/p2p-b2b/ratelimiter"
+  "github.com/slashdevops/ratelimiter"
   "golang.org/x/time/rate"
 )
 
