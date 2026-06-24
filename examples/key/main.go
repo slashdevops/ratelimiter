@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/p2p-b2b/ratelimiter"
+	"github.com/slashdevops/ratelimiter"
 	"golang.org/x/time/rate"
 )
 
