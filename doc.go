@@ -22,9 +22,17 @@
 //		// allowed
 //	}
 //
+// Limiters are consumed through the [Limiter] interface (Allow, Wait, Burst).
+// A limiter may optionally also implement [Reserver] to reserve a token and
+// report the exact delay until it is valid; the default limiter from
+// [NewRateLimiterFunc] does, which lets HTTP middleware emit accurate
+// Retry-After headers for any backend. See the examples directory for a runnable
+// HTTP middleware.
+//
 // The [Storage] interface can be implemented to plug in a custom in-process
-// store. Note that the token-bucket state lives in memory inside each
-// *rate.Limiter, so this package targets single-process rate limiting.
-// Distributed rate limiting across multiple instances requires a different
-// algorithm and is out of scope.
+// store; see [Storage] and the customstorage example. Note that the
+// token-bucket state lives in memory inside each *rate.Limiter, so this package
+// targets single-process rate limiting. Distributed rate limiting across
+// multiple instances requires a different algorithm (a datastore-backed
+// [Limiter]) and is out of scope for the bundled types.
 package ratelimiter

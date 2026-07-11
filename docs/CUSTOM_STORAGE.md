@@ -358,6 +358,45 @@ func (l *valkeyLimiter) eval(ctx context.Context, cost int) (allowed bool, retry
 var _ ratelimiter.Limiter = (*valkeyLimiter)(nil)
 ```
 
+### Accurate `Retry-After`: implement `Reserver` too
+
+The [`Reserver`](../reservation.go) interface lets HTTP middleware read the exact
+delay until the next token and emit accurate `Retry-After` / `RateLimit-Reset`
+headers **for any backend** — the [middleware example](../examples/middleware/main.go)
+feature-detects it. Your Lua script already returns `retry_after_ms`, so exposing
+it is a few lines and makes the Valkey limiter a first-class citizen of that
+middleware (instead of degrading to `Allow`-only):
+
+```go
+type valkeyReservation struct {
+	limiter *valkeyLimiter
+	ok      bool
+	delay   time.Duration
+}
+
+func (r valkeyReservation) OK() bool           { return r.ok }
+func (r valkeyReservation) Delay() time.Duration { return r.delay }
+func (r valkeyReservation) Cancel()            { /* optional: return the token via a compensating EVAL */ }
+
+func (l *valkeyLimiter) Reserve() ratelimiter.Reservation {
+	allowed, retry, err := l.eval(context.Background(), 1)
+	if err != nil {
+		return valkeyReservation{limiter: l, ok: false}
+	}
+	// allowed -> delay 0; otherwise the caller waits retry before the token is valid.
+	return valkeyReservation{limiter: l, ok: true, delay: retry}
+}
+
+var _ ratelimiter.Reserver = (*valkeyLimiter)(nil)
+```
+
+> `Cancel` is best-effort for a distributed limiter: returning a token means an
+> extra round-trip (a compensating script that credits one token back). If you
+> reserve-then-reject on every over-limit request, a cheap option is to not
+> pre-consume in `Reserve` at all — compute the delay with a read-only variant of
+> the script and only consume in `Allow`. Choose the trade-off that fits your
+> accuracy vs. round-trip budget.
+
 ### Wiring it through a `Storage` resolver
 
 The store injects the shared client and binds the key. It ignores the

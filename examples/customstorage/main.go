@@ -38,7 +38,7 @@ import (
 type LRUStorage[K comparable, V any] struct {
 	mu       sync.Mutex
 	capacity int
-	ll       *list.List        // front = most-recently-used
+	ll       *list.List // front = most-recently-used
 	items    map[K]*list.Element
 }
 

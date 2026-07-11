@@ -21,6 +21,7 @@ mechanically.
 | Calling on the manager   | `manager.Allow()` / `.Wait()` / `.Burst()`      | removed — use `manager.GetOrAdd(key).Allow()` etc.                |
 | Manual removal           | `err := manager.Remove(key)`                    | `manager.Remove(key)` *(no return value)*                        |
 | `Storage` interface      | non-generic, `Store/Load/Delete`                | generic `Storage[K, V]`, adds `LoadOrStore` and `Range`          |
+| Default limiter type     | `NewRateLimiterFunc` builds a bare `*rate.Limiter` | builds a `RateLimiter` (wraps `*rate.Limiter`, adds `Reserver`) |
 
 ## 1. `NewInMemoryStorage` now requires type parameters
 
@@ -121,6 +122,38 @@ type Storage[K comparable, V any] interface {
   creating duplicate limiters.
 - `Range` is used by the manager only indirectly; implement it to iterate the
   current entries (return `false` from `f` to stop early).
+
+## 7. `NewRateLimiterFunc` returns `RateLimiter`, not `*rate.Limiter`
+
+The factory now hands out a `ratelimiter.RateLimiter` — a thin wrapper that
+embeds `*rate.Limiter` and additionally implements the new
+[`Reserver`](../reservation.go) interface. This is what lets middleware compute
+an accurate `Retry-After` for any backend without importing `golang.org/x/time/rate`.
+
+Almost all code is unaffected: `Allow`, `Wait`, and `Burst` are promoted from the
+embedded `*rate.Limiter`, so `manager.GetOrAdd(key).Allow()` is unchanged. The
+only thing that breaks is a **type assertion to the concrete `*rate.Limiter`**:
+
+```go
+// Before — downcast to reach Reserve/ReserveN:
+if rl, ok := manager.GetOrAdd(key).(*rate.Limiter); ok {
+    res := rl.ReserveN(time.Now(), 1)
+    // ...
+}
+
+// After — feature-detect the backend-agnostic Reserver instead:
+if r, ok := manager.GetOrAdd(key).(ratelimiter.Reserver); ok {
+    res := r.Reserve()
+    _ = res.Delay()
+}
+
+// Or, if you specifically need *rate.Limiter's richer API, assert the wrapper
+// and reach the embedded field:
+if rl, ok := manager.GetOrAdd(key).(ratelimiter.RateLimiter); ok {
+    res := rl.Limiter.ReserveN(time.Now(), 1)
+    // ...
+}
+```
 
 ## Behavioral changes (no code change required)
 
