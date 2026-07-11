@@ -35,7 +35,7 @@ idle for a configurable duration.
   that have not been used for `deleteAfter`; active keys are kept alive. Stop it
   with `Close()`.
 - **Type-safe & generic** — `Storage[K, V]` and `BucketLimiter[K]` use Go
-  generics (Go 1.25+).
+  generics (Go 1.26+).
 - **Extensible** — implement the `Storage` interface for a custom in-process
   store, or the `Limiter` interface for a custom algorithm.
 - **HTTP middleware example** — with accurate `Retry-After` and `RateLimit-*`
@@ -114,7 +114,7 @@ sequenceDiagram
 go get github.com/slashdevops/ratelimiter
 ```
 
-Requires Go 1.25.2 or newer.
+Requires Go 1.26 or newer.
 
 ## Quick start
 
