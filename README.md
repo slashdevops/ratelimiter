@@ -41,6 +41,73 @@ idle for a configurable duration.
 - **HTTP middleware example** — with accurate `Retry-After` and `RateLimit-*`
   response headers.
 
+## Architecture
+
+`BucketLimiter` is a thin manager: it maps each key to its own `Limiter`,
+builds new ones on demand through a factory, persists them in a pluggable
+`Storage`, and runs a single background goroutine that evicts idle keys.
+
+```mermaid
+flowchart TD
+    subgraph caller["Your code"]
+        C["GetOrAdd(key)"]
+    end
+
+    subgraph manager["BucketLimiter[K]"]
+        direction TB
+        F["newLimiter func() Limiter<br/>(factory)"]
+        A["access map<br/>K → last-use time"]
+        S["sweepLoop goroutine<br/>evicts idle keys"]
+    end
+
+    subgraph store["Storage[K, Limiter]"]
+        direction LR
+        K1["user-123 → bucket"]
+        K2["user-456 → bucket"]
+        K3["10.0.0.7 → bucket"]
+    end
+
+    C -->|"1. Load / LoadOrStore"| store
+    C -.->|"2. build on miss"| F
+    F -.->|"fresh *rate.Limiter"| store
+    C -->|"3. touch"| A
+    S -->|"Delete idle"| store
+    S -->|"Delete idle"| A
+
+    K1 & K2 & K3 -->|"independent<br/>token buckets"| RL["golang.org/x/time/rate"]
+```
+
+Each key owns an **independent** token bucket, so one client draining its
+budget has no effect on any other. A typical `GetOrAdd(key).Allow()` call:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Your code
+    participant BL as BucketLimiter
+    participant St as Storage
+    participant Lim as Limiter (bucket)
+
+    App->>BL: GetOrAdd(key)
+    BL->>St: Load(key)
+    alt key exists
+        St-->>BL: existing Limiter
+    else first use of key
+        BL->>BL: newLimiter()
+        BL->>St: LoadOrStore(key, fresh)
+        Note over BL,St: atomic — racing callers<br/>share one instance
+        St-->>BL: stored Limiter
+    end
+    BL->>BL: touch(key) — refresh idle timer
+    BL-->>App: Limiter
+    App->>Lim: Allow()
+    alt token available
+        Lim-->>App: true (consume 1 token)
+    else bucket empty
+        Lim-->>App: false (rate limited → 429)
+    end
+```
+
 ## Installation
 
 ```bash
