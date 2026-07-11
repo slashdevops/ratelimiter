@@ -1,6 +1,10 @@
 # ratelimiter
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/slashdevops/ratelimiter.svg)](https://pkg.go.dev/github.com/slashdevops/ratelimiter)
+![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/slashdevops/ratelimiter?style=plastic)
+[![license](https://img.shields.io/github/license/slashdevops/ratelimiter.svg)](https://github.com/slashdevops/ratelimiter/blob/main/LICENSE)
+[![Release](https://github.com/slashdevops/ratelimiter/actions/workflows/release.yml/badge.svg)](https://github.com/slashdevops/ratelimiter/actions/workflows/release.yml)
+[![CodeQL Advanced](https://github.com/slashdevops/ratelimiter/actions/workflows/codeql.yml/badge.svg)](https://github.com/slashdevops/ratelimiter/actions/workflows/codeql.yml)
 
 A flexible, goroutine-safe, **per-key** rate limiter for Go, built as a thin
 manager around the token-bucket implementation in

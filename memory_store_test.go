@@ -1,39 +1,51 @@
 package ratelimiter
 
 import (
+	"maps"
 	"sync"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestInMemoryStorage_StoreLoadDelete(t *testing.T) {
 	s := NewInMemoryStorage[string, int]()
 
-	_, ok := s.Load("missing")
-	assert.False(t, ok, "load of absent key returns zero, false")
+	if _, ok := s.Load("missing"); ok {
+		t.Error("load of absent key should return zero, false")
+	}
 
 	s.Store("a", 1)
 	v, ok := s.Load("a")
-	require.True(t, ok)
-	assert.Equal(t, 1, v)
+	if !ok {
+		t.Fatal("stored key should be found")
+	}
+	if v != 1 {
+		t.Errorf("Load(\"a\") = %d, want 1", v)
+	}
 
 	s.Delete("a")
-	_, ok = s.Load("a")
-	assert.False(t, ok)
+	if _, ok := s.Load("a"); ok {
+		t.Error("key should be gone after Delete")
+	}
 }
 
 func TestInMemoryStorage_LoadOrStore(t *testing.T) {
 	s := NewInMemoryStorage[string, int]()
 
 	actual, loaded := s.LoadOrStore("k", 10)
-	assert.False(t, loaded)
-	assert.Equal(t, 10, actual)
+	if loaded {
+		t.Error("first LoadOrStore should report loaded=false")
+	}
+	if actual != 10 {
+		t.Errorf("first LoadOrStore = %d, want 10", actual)
+	}
 
 	actual, loaded = s.LoadOrStore("k", 20)
-	assert.True(t, loaded, "second call should load the existing value")
-	assert.Equal(t, 10, actual, "existing value wins")
+	if !loaded {
+		t.Error("second call should load the existing value")
+	}
+	if actual != 10 {
+		t.Errorf("existing value should win: got %d, want 10", actual)
+	}
 }
 
 // TestInMemoryStorage_LoadOrStore_Atomic verifies concurrent racers converge on
@@ -56,7 +68,9 @@ func TestInMemoryStorage_LoadOrStore_Atomic(t *testing.T) {
 
 	winner := results[0]
 	for i, got := range results {
-		assert.Equal(t, winner, got, "goroutine %d disagreed on the stored value", i)
+		if got != winner {
+			t.Errorf("goroutine %d disagreed on the stored value: got %d, want %d", i, got, winner)
+		}
 	}
 }
 
@@ -71,7 +85,9 @@ func TestInMemoryStorage_Range(t *testing.T) {
 		seen[k] = v
 		return true
 	})
-	assert.Equal(t, map[string]int{"a": 1, "b": 2, "c": 3}, seen)
+	if want := map[string]int{"a": 1, "b": 2, "c": 3}; !maps.Equal(seen, want) {
+		t.Errorf("Range visited %v, want %v", seen, want)
+	}
 
 	// Early stop after the first element.
 	count := 0
@@ -79,5 +95,7 @@ func TestInMemoryStorage_Range(t *testing.T) {
 		count++
 		return false
 	})
-	assert.Equal(t, 1, count, "returning false stops iteration")
+	if count != 1 {
+		t.Errorf("returning false should stop iteration after 1 element, got %d", count)
+	}
 }
