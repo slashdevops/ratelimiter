@@ -211,10 +211,12 @@ go run ./examples/key -limit 1 -burst 3
 
 ## Custom storage
 
-Implement `Storage[K, V]` to back the manager with your own in-process store —
-for example a size-bounded LRU to cap memory instead of (or in addition to)
-time-based eviction. Implementations must be safe for concurrent use, and
-`LoadOrStore` must be atomic.
+`BucketLimiter` talks to the `Storage[K, V]` interface, never a concrete map,
+and you inject the implementation at construction time. `InMemoryStorage` is
+just the bundled **default** — implement the interface to bring your own
+in-process store (for example a size-bounded LRU to cap memory instead of, or in
+addition to, time-based eviction). Implementations must be safe for concurrent
+use, and `LoadOrStore` must be atomic.
 
 ```go
 type Storage[K comparable, V any] interface {
@@ -225,6 +227,19 @@ type Storage[K comparable, V any] interface {
 	Range(f func(key K, value V) bool)
 }
 ```
+
+A complete, runnable size-bounded LRU store lives in
+[`examples/customstorage`](examples/customstorage/main.go):
+
+```bash
+go run ./examples/customstorage -cap 2
+```
+
+**[docs/CUSTOM_STORAGE.md](docs/CUSTOM_STORAGE.md)** is a full guide: the method
+contracts, how to test atomicity, and — importantly — why a custom `Storage` is
+**in-process only**, plus the correct pattern for **distributed limiting with
+Redis / [Valkey](https://github.com/valkey-io/valkey-go)** (a datastore-backed
+`Limiter` wired through a `Storage` resolver, with the token-bucket Lua script).
 
 ## Scope: single-process only
 
