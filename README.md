@@ -2,25 +2,40 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/slashdevops/ratelimiter.svg)](https://pkg.go.dev/github.com/slashdevops/ratelimiter)
 
-## Introduction
+A flexible, goroutine-safe, **per-key** rate limiter for Go, built as a thin
+manager around the token-bucket implementation in
+[`golang.org/x/time/rate`](https://pkg.go.dev/golang.org/x/time/rate).
 
-`ratelimiter` is a flexible and extensible rate limiter library for Go, built as a wrapper around the standard `golang.org/x/time/rate` package. It utilizes the token bucket algorithm to control the rate of operations, making it suitable for scenarios like API request limiting, resource access control, and preventing abuse.
+Each key (a user ID, API key, or IP address) gets its **own independent token
+bucket**, so one client exhausting its budget never affects another. Limiters
+are created lazily on first use and automatically evicted after they have been
+idle for a configurable duration.
 
-The library allows creating rate limiters specific to different keys (e.g., user IDs, IP addresses) that can be safely shared across multiple goroutines. It includes an in-memory storage backend by default and features automatic cleanup of limiters that haven't been used for a configurable duration.
-
-For advanced use cases, you can provide your own storage backend by implementing the `Storage` interface or even define custom rate-limiting logic by implementing the `Limiter` interface.
+> **New to token buckets?** See [docs/TOKEN_BUCKET.md](docs/TOKEN_BUCKET.md) for
+> a thorough, from-scratch explanation of the algorithm, how to choose `limit`
+> and `burst`, and how the HTTP rate-limit headers work.
+>
+> **Upgrading from an earlier version?** See
+> [docs/MIGRATION.md](docs/MIGRATION.md) for a before/after guide to the breaking
+> API changes.
 
 ## Features
 
-- **Token Bucket Algorithm:** Based on the robust `golang.org/x/time/rate` implementation.
-- **Key-Based Limiting:** Create and manage separate limiters for different identifiers (e.g., IP addresses, user IDs).
-- **Goroutine-Safe:** Designed for concurrent use.
-- **In-Memory Storage:** Comes with a built-in `InMemoryStorage` for easy setup.
-- **Automatic Cleanup:** Unused limiters are automatically removed from storage after a specified duration to conserve resources.
-- **Extensible:**
-  - Implement the `Storage` interface for custom persistence (e.g., Redis, Memcached).
-  - Implement the `Limiter` interface for custom rate-limiting strategies.
-- **Middleware Example:** Includes a practical example for integrating with `net/http` handlers.
+- **Per-key isolation** — a separate token bucket per identifier; keys never
+  share a budget.
+- **Token bucket algorithm** — sustained average rate plus configurable bursts,
+  backed by the battle-tested `golang.org/x/time/rate`.
+- **Goroutine-safe** — designed for concurrent use; key creation is atomic (no
+  duplicate limiters under races).
+- **Automatic idle eviction** — a single background goroutine removes limiters
+  that have not been used for `deleteAfter`; active keys are kept alive. Stop it
+  with `Close()`.
+- **Type-safe & generic** — `Storage[K, V]` and `BucketLimiter[K]` use Go
+  generics (Go 1.25+).
+- **Extensible** — implement the `Storage` interface for a custom in-process
+  store, or the `Limiter` interface for a custom algorithm.
+- **HTTP middleware example** — with accurate `Retry-After` and `RateLimit-*`
+  response headers.
 
 ## Installation
 
@@ -28,171 +43,135 @@ For advanced use cases, you can provide your own storage backend by implementing
 go get github.com/slashdevops/ratelimiter
 ```
 
-## Core Concepts
+Requires Go 1.25 or newer.
 
-- **`Limiter` Interface:** Defines the basic contract for any rate limiter, primarily the `Allow()` method. The standard `golang.org/x/time/rate.Limiter` satisfies this interface.
-- **`Storage` Interface:** Defines methods (`Store`, `Load`, `Delete`) for storing and retrieving limiter instances associated with keys.
-- **`InMemoryStorage`:** A thread-safe, map-based implementation of the `Storage` interface.
-- **`BucketLimiter`:** The main orchestrator. It uses a `Limiter` (like `rate.Limiter`) as a template, a `Storage` backend, and manages the creation, retrieval, and automatic cleanup of key-specific limiters.
-
-## Basic Example
+## Quick start
 
 ```go
 package main
 
 import (
-  "fmt"
-  "time"
+	"fmt"
+	"time"
 
-  "github.com/slashdevops/ratelimiter"
-  "golang.org/x/time/rate"
+	"github.com/slashdevops/ratelimiter"
+	"golang.org/x/time/rate"
 )
 
 func main() {
-  // 1. Create a storage system (in-memory is provided)
-  storage := ratelimiter.NewInMemoryStorage()
+	// A store that keeps one Limiter per key.
+	storage := ratelimiter.NewInMemoryStorage[string, ratelimiter.Limiter]()
 
-  // 2. Define the base rate limit (e.g., 5 requests per second with a burst of 10)
-  baseRate := rate.Limit(5)
-  burstSize := 10
-  baseLimiter := rate.NewLimiter(baseRate, burstSize)
+	// A factory that builds an independent bucket for each new key:
+	// 5 requests/second sustained, absorbing bursts of up to 10.
+	newLimiter := ratelimiter.NewRateLimiterFunc(rate.Limit(5), 10)
 
-  // 3. Configure the BucketLimiter
-  //    Limiters unused for 1 minute will be automatically removed.
-  cleanupInterval := 1 * time.Minute
-  bucketLimiter := ratelimiter.NewBucketLimiter(baseLimiter, cleanupInterval, storage)
+	// The manager. Limiters idle for 1 minute are evicted.
+	manager := ratelimiter.NewBucketLimiter(newLimiter, time.Minute, storage)
+	defer manager.Close() // stop the background eviction goroutine
 
-  // 4. Get or create a limiter for a specific key (e.g., user ID or IP)
-  userID := "user-123"
-  userLimiter := bucketLimiter.GetOrAdd(userID)
-
-  // 5. Check if the operation is allowed
-  if userLimiter.Allow() {
-    fmt.Println("Operation allowed for", userID)
-    // ... perform the rate-limited action ...
-  } else {
-    fmt.Println("Rate limit exceeded for", userID)
-  }
-
-  // Example: Simulate multiple requests
-  for i := 0; i < 15; i++ {
-    if bucketLimiter.GetOrAdd(userID).Allow() {
-      fmt.Printf("Request %d allowed\n", i+1)
-    } else {
-      fmt.Printf("Request %d blocked\n", i+1)
-    }
-    time.Sleep(100 * time.Millisecond) // Simulate some delay
-  }
+	// Each key has its own bucket.
+	if manager.GetOrAdd("user-123").Allow() {
+		fmt.Println("allowed")
+	} else {
+		fmt.Println("rate limited")
+	}
 }
-
 ```
 
-## Middleware Example
+## Core concepts
 
-See [examples](examples/) for more usage examples, including the HTTP middleware.
+| Type / func                        | Role                                                                       |
+|------------------------------------|----------------------------------------------------------------------------|
+| `Limiter`                          | Minimal interface (`Allow`, `Wait`, `Burst`). `*rate.Limiter` satisfies it. |
+| `Storage[K, V]`                    | Pluggable, concurrency-safe store for per-key limiters.                    |
+| `InMemoryStorage[K, V]`            | Default `sync.Map`-backed store.                                            |
+| `BucketLimiter[K]`                 | Manager: hands out one `Limiter` per key, handles creation and eviction.  |
+| `NewRateLimiterFunc(limit, burst)` | Convenience factory for the common `*rate.Limiter` case.                    |
 
-Middleware example:
+### `limit` and `burst`
+
+- **`limit`** (`rate.Limit`) — sustained refill rate in **tokens per second**.
+  Use `rate.Every(d)` for "one every `d`", or `rate.Inf` for unlimited.
+- **`burst`** (`int`) — bucket **capacity**: the largest number of requests
+  allowed in a single instant.
+
+See [docs/TOKEN_BUCKET.md](docs/TOKEN_BUCKET.md#choosing-parameters) for guidance
+on choosing values.
+
+## `Allow` vs. `Wait`
 
 ```go
-package main
+lim := manager.GetOrAdd(key)
 
-import (
-  "flag"
-  "fmt"
-  "net/http"
-  "strings"
-  "time"
-
-  "github.com/slashdevops/ratelimiter"
-  "golang.org/x/time/rate"
-)
-
-// Middleware is a function that wraps an http.Handler to provide additional functionality
-type Middleware func(http.Handler) http.Handler
-
-// ThenFunc wraps an http.HandlerFunc with a middleware
-func (m Middleware) ThenFunc(h http.HandlerFunc) http.Handler {
-  return m(http.HandlerFunc(h))
+// Non-blocking: drop work when over the limit (e.g. HTTP 429).
+if !lim.Allow() {
+	// reject
 }
 
-// IPRateLimiter is a middleware that limits the number of requests from a single IP address
-func IPRateLimiter(limiter *ratelimiter.BucketLimiter) Middleware {
-  return func(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-      ip := strings.Split(r.RemoteAddr, ":")[0]
-
-      lim := limiter.GetOrAdd(ip)
-      if !lim.Allow() {
-        http.Error(w, fmt.Sprintf("too many requests from ip address %s", ip), http.StatusTooManyRequests)
-        return
-      }
-
-      next.ServeHTTP(w, r)
-    })
-  }
+// Blocking: shape work by waiting for a token (pass a ctx with a deadline).
+if err := lim.Wait(ctx); err != nil {
+	// ctx cancelled/expired
 }
+```
 
-func main() {
-  limit := flag.Int("limit", 2, "Rate limit (requests per second)")
-  burst := flag.Int("burst", 1, "Burst size")
-  deleteAfter := flag.Duration("deleteAfter", 5*time.Second, "Duration after which the limiter will be deleted if not used")
-  numberOfRequests := flag.Int("numberOfRequests", 30, "Number of requests to send")
-  waitBetweenRequests := flag.Duration("waitBetweenRequests", 100*time.Millisecond, "Wait time between requests")
+## HTTP middleware
 
-  flag.Parse()
+The [`examples/middleware`](examples/middleware/main.go) program limits requests
+per client IP and sets standard response headers:
 
-  // Create a storage system
-  storage := ratelimiter.NewInMemoryStorage()
+- `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (IETF draft names,
+  plus legacy `X-RateLimit-*`).
+- `Retry-After` on `429`, computed from the actual reservation delay.
 
-  // Create a base rate limiter
-  baseLimiter := rate.NewLimiter(rate.Limit(float64(*limit)), *burst)
+It also extracts the client IP with `net.SplitHostPort`, so it is correct for
+both IPv4 and IPv6.
 
-  // Create a bucket limiter with a deleteAfter duration of 5 seconds
-  bucketLimiter := ratelimiter.NewBucketLimiter(baseLimiter, *deleteAfter, storage)
+```bash
+go run ./examples/middleware -limit 2 -burst 1
+```
 
-  // Create a new HTTP server
-  mux := http.NewServeMux()
+See [`examples/key`](examples/key/main.go) for a minimal, dependency-free demo of
+per-key isolation and bucket refill over time:
 
-  // Register the rate limiting middleware
-  mux.Handle("GET /", IPRateLimiter(bucketLimiter).ThenFunc(func(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintln(w, "Hello, world without limit!")
-  }))
+```bash
+go run ./examples/key -limit 1 -burst 3
+```
 
-  // go routine doing request
-  go func() {
-    // wait until the server is up
-    fmt.Println("Waiting for server to start...")
-    time.Sleep(2 * time.Second)
+## Custom storage
 
-    for range *numberOfRequests {
+Implement `Storage[K, V]` to back the manager with your own in-process store —
+for example a size-bounded LRU to cap memory instead of (or in addition to)
+time-based eviction. Implementations must be safe for concurrent use, and
+`LoadOrStore` must be atomic.
 
-      resp, err := http.Get("http://localhost:8080/")
-      if err != nil {
-        fmt.Println("Error:", err)
-        continue
-      }
-      resp.Body.Close()
-
-      if resp.StatusCode == http.StatusOK {
-        fmt.Println("Request allowed")
-      } else {
-        fmt.Println("Request rejected:", resp.Status)
-      }
-      time.Sleep(*waitBetweenRequests) // Wait between requests
-    }
-
-    fmt.Println()
-    fmt.Println("Finished sending requests, press Ctrl+C to stop the server")
-  }()
-
-  // Start the server
-  fmt.Println("Starting server on :8080...")
-  if err := http.ListenAndServe(":8080", mux); err != nil {
-    fmt.Println("Error starting server:", err)
-  }
+```go
+type Storage[K comparable, V any] interface {
+	Store(key K, value V)
+	Load(key K) (value V, ok bool)
+	LoadOrStore(key K, value V) (actual V, loaded bool)
+	Delete(key K)
+	Range(f func(key K, value V) bool)
 }
+```
+
+## Scope: single-process only
+
+Token state lives in memory inside each `*rate.Limiter`, so this library
+enforces limits **within one process**. Running N instances behind a load
+balancer yields an effective global limit of up to N × `limit`. Global,
+cross-instance limiting requires a distributed algorithm (e.g. a Redis script)
+and is out of scope. The `Storage` interface is for custom *in-process* stores,
+not for synchronizing token state across machines. See
+[docs/TOKEN_BUCKET.md](docs/TOKEN_BUCKET.md#single-process-vs-distributed).
+
+## Testing
+
+```bash
+go test -race ./...
+go test -bench . -benchmem ./...
 ```
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+Apache License 2.0. See [LICENSE](LICENSE).

@@ -1,33 +1,97 @@
+// Command middleware demonstrates using ratelimiter as per-client HTTP
+// middleware, including standard rate-limit response headers.
+//
+// It limits requests per client IP address. Each IP gets its own token bucket,
+// so one noisy client cannot exhaust the budget of others. When a client is
+// throttled the handler responds 429 Too Many Requests with an accurate
+// Retry-After header, and every response carries RateLimit-* headers so
+// well-behaved clients can self-throttle.
+//
+// Run it:
+//
+//	go run ./examples/middleware -limit 2 -burst 1
 package main
 
 import (
 	"flag"
 	"fmt"
+	"math"
+	"net"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/slashdevops/ratelimiter"
 	"golang.org/x/time/rate"
 )
 
-// Middleware is a function that wraps an http.Handler to provide additional functionality
+// Middleware wraps an http.Handler with additional behavior.
 type Middleware func(http.Handler) http.Handler
 
-// ThenFunc wraps an http.HandlerFunc with a middleware
+// ThenFunc adapts an http.HandlerFunc through the middleware.
 func (m Middleware) ThenFunc(h http.HandlerFunc) http.Handler {
 	return m(http.HandlerFunc(h))
 }
 
-// IPRateLimiter is a middleware that limits the number of requests from a single IP address
-func IPRateLimiter(limiter *ratelimiter.BucketLimiter) Middleware {
+// clientIP extracts the client IP from the request. It uses net.SplitHostPort
+// so it works for both IPv4 (1.2.3.4:5678) and IPv6 ([::1]:5678) remote
+// addresses. In production behind a proxy or load balancer you would instead
+// parse a trusted X-Forwarded-For / Forwarded header.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// IPRateLimiter returns middleware that rate limits requests per client IP.
+//
+// On every request it consults the client's own token bucket via Reserve,
+// which lets us both decide whether to allow the request and compute an
+// accurate Retry-After when we don't. The following response headers are set:
+//
+//   - RateLimit-Limit:     bucket capacity (burst) for this client.
+//   - RateLimit-Remaining: whole tokens currently available.
+//   - RateLimit-Reset:     seconds until the bucket is expected to have a token.
+//   - Retry-After:         (429 only) seconds the client should wait before retrying.
+//
+// The RateLimit-* names follow the IETF "RateLimit header fields for HTTP"
+// draft; the widely-deployed X-RateLimit-* variants are set too for
+// compatibility with older clients.
+func IPRateLimiter(manager *ratelimiter.BucketLimiter[string]) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := strings.Split(r.RemoteAddr, ":")[0]
+			ip := clientIP(r)
+			limiter := manager.GetOrAdd(ip)
 
-			lim := limiter.GetOrAdd(ip)
-			if !lim.Allow() {
-				http.Error(w, fmt.Sprintf("too many requests from ip address %s", ip), http.StatusTooManyRequests)
+			// The manager hands out *rate.Limiter values via NewRateLimiterFunc,
+			// so we can use the richer Reserve API for accurate headers.
+			rl, ok := limiter.(*rate.Limiter)
+			if !ok {
+				// Fallback for custom Limiter implementations: Allow-only.
+				if !limiter.Allow() {
+					http.Error(w, "too many requests", http.StatusTooManyRequests)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			now := time.Now()
+			res := rl.ReserveN(now, 1)
+			delay := res.DelayFrom(now)
+
+			setHeader(w, "RateLimit-Limit", strconv.Itoa(rl.Burst()))
+			setHeader(w, "RateLimit-Remaining", strconv.Itoa(int(rl.TokensAt(now))))
+			setHeader(w, "RateLimit-Reset", strconv.Itoa(secondsCeil(delay)))
+
+			if !res.OK() || delay > 0 {
+				// Not allowed right now: give the token back and reject.
+				res.Cancel()
+				retryAfter := max(secondsCeil(delay), 1)
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				http.Error(w, fmt.Sprintf("too many requests from %s", ip), http.StatusTooManyRequests)
 				return
 			}
 
@@ -36,40 +100,44 @@ func IPRateLimiter(limiter *ratelimiter.BucketLimiter) Middleware {
 	}
 }
 
-func main() {
-	limit := flag.Int("limit", 2, "Rate limit (requests per second)")
-	burst := flag.Int("burst", 1, "Burst size")
-	deleteAfter := flag.Duration("deleteAfter", 5*time.Second, "Duration after which the limiter will be deleted if not used")
-	numberOfRequests := flag.Int("numberOfRequests", 30, "Number of requests to send")
-	waitBetweenRequests := flag.Duration("waitBetweenRequests", 100*time.Millisecond, "Wait time between requests")
+// setHeader writes both the IETF draft name and the legacy X- prefixed name.
+func setHeader(w http.ResponseWriter, name, value string) {
+	w.Header().Set(name, value)
+	w.Header().Set("X-"+name, value)
+}
 
+// secondsCeil rounds a duration up to whole seconds (never negative).
+func secondsCeil(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	return int(math.Ceil(d.Seconds()))
+}
+
+func main() {
+	limit := flag.Int("limit", 2, "sustained rate limit (requests per second)")
+	burst := flag.Int("burst", 1, "burst size (bucket capacity)")
+	deleteAfter := flag.Duration("deleteAfter", 5*time.Second, "idle duration after which a client's limiter is evicted")
+	numberOfRequests := flag.Int("numberOfRequests", 30, "number of demo requests to send")
+	waitBetweenRequests := flag.Duration("waitBetweenRequests", 100*time.Millisecond, "wait time between demo requests")
 	flag.Parse()
 
-	// Create a storage system
-	storage := ratelimiter.NewInMemoryStorage()
+	storage := ratelimiter.NewInMemoryStorage[string, ratelimiter.Limiter]()
+	newLimiter := ratelimiter.NewRateLimiterFunc(rate.Limit(float64(*limit)), *burst)
+	manager := ratelimiter.NewBucketLimiter(newLimiter, *deleteAfter, storage)
+	defer manager.Close()
 
-	// Create a base rate limiter
-	baseLimiter := rate.NewLimiter(rate.Limit(float64(*limit)), *burst)
-
-	// Create a bucket limiter with a deleteAfter duration of 5 seconds
-	bucketLimiter := ratelimiter.NewBucketLimiter(baseLimiter, *deleteAfter, storage)
-
-	// Create a new HTTP server
 	mux := http.NewServeMux()
-
-	// Register the rate limiting middleware
-	mux.Handle("GET /", IPRateLimiter(bucketLimiter).ThenFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, world without limit!")
+	mux.Handle("GET /", IPRateLimiter(manager).ThenFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, world!")
 	}))
 
-	// go routine doing request
+	// Demo client that fires requests at the local server.
 	go func() {
-		// wait until the server is up
 		fmt.Println("Waiting for server to start...")
-		time.Sleep(2 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 
 		for range *numberOfRequests {
-
 			resp, err := http.Get("http://localhost:8080/")
 			if err != nil {
 				fmt.Println("Error:", err)
@@ -77,19 +145,17 @@ func main() {
 			}
 			resp.Body.Close()
 
-			if resp.StatusCode == http.StatusOK {
-				fmt.Println("Request allowed")
-			} else {
-				fmt.Println("Request rejected:", resp.Status)
+			switch resp.StatusCode {
+			case http.StatusOK:
+				fmt.Printf("allowed  (remaining=%s)\n", resp.Header.Get("RateLimit-Remaining"))
+			default:
+				fmt.Printf("rejected %s (retry-after=%s)\n", resp.Status, resp.Header.Get("Retry-After"))
 			}
-			time.Sleep(*waitBetweenRequests) // Wait between requests
+			time.Sleep(*waitBetweenRequests)
 		}
-
-		fmt.Println()
-		fmt.Println("Finished sending requests, press Ctrl+C to stop the server")
+		fmt.Println("\nFinished sending requests, press Ctrl+C to stop the server")
 	}()
 
-	// Start the server
 	fmt.Println("Starting server on :8080...")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		fmt.Println("Error starting server:", err)
