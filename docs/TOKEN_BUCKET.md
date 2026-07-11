@@ -53,6 +53,19 @@ Picture a bucket that holds tokens:
              request limited  (bucket empty)
 ```
 
+The same idea as a flow diagram:
+
+```mermaid
+flowchart TD
+    R["Refill: +r tokens / second"] -->|"drip"| B
+    B{"Bucket<br/>capacity = burst b"}
+    B -->|"overflow above b"| X["discarded"]
+    Req(["Incoming request<br/>needs 1 token"]) --> Q{"tokens ≥ 1 ?"}
+    Q -->|"yes"| Take["consume 1 token"] --> Allowed(["✅ allowed"])
+    Q -->|"no"| Limited(["⛔ limited — reject or wait"])
+    B -.->|"current level"| Q
+```
+
 Rules:
 
 1. Tokens are added to the bucket at a steady **rate** `r` (tokens per second).
@@ -208,6 +221,24 @@ full bucket. Choose `deleteAfter` comfortably longer than the window over which
 you want the limit to hold (e.g. minutes, not milliseconds) so a client cannot
 reset its own bucket by pausing briefly.
 
+The lifecycle of a single key:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Absent
+    Absent --> Active: GetOrAdd(key)<br/>newLimiter() builds a fresh bucket
+    Active --> Active: GetOrAdd(key)<br/>refreshes idle timer
+    Active --> Idle: no access for deleteAfter
+    Idle --> Active: GetOrAdd(key)<br/>before the sweep runs
+    Idle --> Absent: sweepLoop evicts<br/>(state discarded)
+    Active --> Absent: Remove(key)
+    Absent --> [*]
+```
+
+The sweep is not instantaneous, so a key idle past `deleteAfter` lingers until
+the next tick — worst case ~1.5·`deleteAfter` after its last use with the
+default interval.
+
 ## HTTP response headers
 
 Well-behaved HTTP clients can self-throttle if you tell them the state of their
@@ -226,6 +257,34 @@ the example also emits the legacy `X-RateLimit-*` variants for older clients.
 `Retry-After` is standardized in
 [RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3) and is
 computed from the reservation delay so it is accurate rather than a guess.
+
+End to end, a request through the middleware:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant MW as Middleware
+    participant BL as BucketLimiter
+    participant Lim as Limiter (per-IP bucket)
+    participant H as Handler
+
+    Client->>MW: HTTP request
+    MW->>MW: extract client IP<br/>(net.SplitHostPort)
+    MW->>BL: GetOrAdd(ip)
+    BL-->>MW: Limiter
+    MW->>Lim: ReserveN(now, 1)
+    alt token available now (delay == 0)
+        Lim-->>MW: reservation, DelayFrom(now) = 0
+        MW->>H: serve
+        H-->>MW: response
+        MW-->>Client: 200 OK<br/>RateLimit-Limit / Remaining / Reset
+    else bucket empty (delay > 0)
+        Lim-->>MW: reservation, DelayFrom(now) = d
+        MW->>Lim: reservation.Cancel()<br/>(return the token)
+        MW-->>Client: 429 Too Many Requests<br/>Retry-After: ⌈d⌉
+    end
+```
 
 ## Comparison with other algorithms
 
