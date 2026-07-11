@@ -114,7 +114,7 @@ sequenceDiagram
 go get github.com/slashdevops/ratelimiter
 ```
 
-Requires Go 1.25 or newer.
+Requires Go 1.25.2 or newer.
 
 ## Quick start
 
