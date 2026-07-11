@@ -14,6 +14,10 @@ idle for a configurable duration.
 > **New to token buckets?** See [docs/TOKEN_BUCKET.md](docs/TOKEN_BUCKET.md) for
 > a thorough, from-scratch explanation of the algorithm, how to choose `limit`
 > and `burst`, and how the HTTP rate-limit headers work.
+>
+> **Upgrading from an earlier version?** See
+> [docs/MIGRATION.md](docs/MIGRATION.md) for a before/after guide to the breaking
+> API changes.
 
 ## Features
 
