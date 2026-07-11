@@ -65,26 +65,33 @@ func IPRateLimiter(manager *ratelimiter.BucketLimiter[string]) Middleware {
 			ip := clientIP(r)
 			limiter := manager.GetOrAdd(ip)
 
-			// The manager hands out *rate.Limiter values via NewRateLimiterFunc,
-			// so we can use the richer Reserve API for accurate headers.
-			rl, ok := limiter.(*rate.Limiter)
+			setHeader(w, "RateLimit-Limit", strconv.Itoa(limiter.Burst()))
+
+			// Prefer the backend-agnostic Reserver capability: it yields the exact
+			// delay until a token is available, which drives accurate Retry-After
+			// and RateLimit-Reset headers for ANY Limiter implementation — a
+			// *rate.Limiter, a Redis/Valkey-backed one, etc. Limiters that cannot
+			// reserve degrade to a plain Allow() decision without timing headers.
+			reserver, ok := limiter.(ratelimiter.Reserver)
 			if !ok {
-				// Fallback for custom Limiter implementations: Allow-only.
 				if !limiter.Allow() {
-					http.Error(w, "too many requests", http.StatusTooManyRequests)
+					w.Header().Set("Retry-After", "1")
+					http.Error(w, fmt.Sprintf("too many requests from %s", ip), http.StatusTooManyRequests)
 					return
 				}
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			now := time.Now()
-			res := rl.ReserveN(now, 1)
-			delay := res.DelayFrom(now)
+			res := reserver.Reserve()
+			delay := res.Delay()
 
-			setHeader(w, "RateLimit-Limit", strconv.Itoa(rl.Burst()))
-			setHeader(w, "RateLimit-Remaining", strconv.Itoa(int(rl.TokensAt(now))))
 			setHeader(w, "RateLimit-Reset", strconv.Itoa(secondsCeil(delay)))
+			// RateLimit-Remaining is backend-specific; enrich it opportunistically
+			// when the limiter can report its current token count.
+			if rl, ok := limiter.(ratelimiter.RateLimiter); ok {
+				setHeader(w, "RateLimit-Remaining", strconv.Itoa(int(rl.TokensAt(time.Now()))))
+			}
 
 			if !res.OK() || delay > 0 {
 				// Not allowed right now: give the token back and reject.

@@ -37,9 +37,10 @@ idle for a configurable duration.
 - **Type-safe & generic** — `Storage[K, V]` and `BucketLimiter[K]` use Go
   generics (Go 1.26+).
 - **Extensible** — implement the `Storage` interface for a custom in-process
-  store, or the `Limiter` interface for a custom algorithm.
+  store, or the `Limiter` interface for a custom algorithm (optionally adding
+  `Reserver` for accurate `Retry-After`, even with a Redis/Valkey backend).
 - **HTTP middleware example** — with accurate `Retry-After` and `RateLimit-*`
-  response headers.
+  response headers, driven by the backend-agnostic `Reserver` interface.
 
 ## Architecture
 
@@ -155,10 +156,12 @@ func main() {
 | Type / func                        | Role                                                                       |
 |------------------------------------|----------------------------------------------------------------------------|
 | `Limiter`                          | Minimal interface (`Allow`, `Wait`, `Burst`). `*rate.Limiter` satisfies it. |
+| `Reserver` / `Reservation`         | Optional capability: reserve a token and read its delay. Enables accurate `Retry-After` for any backend. |
+| `RateLimiter`                      | Default limiter: wraps `*rate.Limiter`, implements `Limiter` **and** `Reserver`. |
 | `Storage[K, V]`                    | Pluggable, concurrency-safe store for per-key limiters.                    |
 | `InMemoryStorage[K, V]`            | Default `sync.Map`-backed store.                                            |
 | `BucketLimiter[K]`                 | Manager: hands out one `Limiter` per key, handles creation and eviction.  |
-| `NewRateLimiterFunc(limit, burst)` | Convenience factory for the common `*rate.Limiter` case.                    |
+| `NewRateLimiterFunc(limit, burst)` | Convenience factory producing `RateLimiter` values.                        |
 
 ### `limit` and `burst`
 
@@ -186,6 +189,33 @@ if err := lim.Wait(ctx); err != nil {
 }
 ```
 
+### Reserve (for accurate `Retry-After`)
+
+When you need the exact delay until the next token — to set a `Retry-After` or
+`RateLimit-Reset` header — use the optional `Reserver` capability. Feature-detect
+it so your code works with any limiter and degrades gracefully:
+
+```go
+lim := manager.GetOrAdd(key)
+
+if r, ok := lim.(ratelimiter.Reserver); ok {
+	res := r.Reserve()
+	if res.OK() && res.Delay() == 0 {
+		// proceed now
+	} else {
+		res.Cancel()                 // return the token
+		retryAfter := res.Delay()    // tell the client exactly how long to wait
+	}
+} else {
+	_ = lim.Allow() // limiter without reservation support: no timing info
+}
+```
+
+The default `RateLimiter` from `NewRateLimiterFunc` implements `Reserver`, and a
+custom (e.g. Redis/Valkey-backed) `Limiter` can too — so the same middleware
+produces accurate headers regardless of backend. See
+[docs/CUSTOM_STORAGE.md](docs/CUSTOM_STORAGE.md#distributed-limiting-with-redis--valkey).
+
 ## HTTP middleware
 
 The [`examples/middleware`](examples/middleware/main.go) program limits requests
@@ -211,10 +241,12 @@ go run ./examples/key -limit 1 -burst 3
 
 ## Custom storage
 
-Implement `Storage[K, V]` to back the manager with your own in-process store —
-for example a size-bounded LRU to cap memory instead of (or in addition to)
-time-based eviction. Implementations must be safe for concurrent use, and
-`LoadOrStore` must be atomic.
+`BucketLimiter` talks to the `Storage[K, V]` interface, never a concrete map,
+and you inject the implementation at construction time. `InMemoryStorage` is
+just the bundled **default** — implement the interface to bring your own
+in-process store (for example a size-bounded LRU to cap memory instead of, or in
+addition to, time-based eviction). Implementations must be safe for concurrent
+use, and `LoadOrStore` must be atomic.
 
 ```go
 type Storage[K comparable, V any] interface {
@@ -225,6 +257,19 @@ type Storage[K comparable, V any] interface {
 	Range(f func(key K, value V) bool)
 }
 ```
+
+A complete, runnable size-bounded LRU store lives in
+[`examples/customstorage`](examples/customstorage/main.go):
+
+```bash
+go run ./examples/customstorage -cap 2
+```
+
+**[docs/CUSTOM_STORAGE.md](docs/CUSTOM_STORAGE.md)** is a full guide: the method
+contracts, how to test atomicity, and — importantly — why a custom `Storage` is
+**in-process only**, plus the correct pattern for **distributed limiting with
+Redis / [Valkey](https://github.com/valkey-io/valkey-go)** (a datastore-backed
+`Limiter` wired through a `Storage` resolver, with the token-bucket Lua script).
 
 ## Scope: single-process only
 

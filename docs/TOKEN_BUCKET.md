@@ -132,8 +132,8 @@ With `burst = 5` instead, the first **five** requests at `t = 0` are allowed
 
 ## Allow vs. Wait vs. Reserve
 
-The same bucket can be consumed three ways. `ratelimiter.Limiter` exposes the
-first two; the underlying `*rate.Limiter` also offers `Reserve`.
+The same bucket can be consumed three ways. `ratelimiter.Limiter` exposes
+`Allow` and `Wait`; the optional `ratelimiter.Reserver` interface adds `Reserve`.
 
 - **`Allow() bool`** — non-blocking. Returns `true` and consumes a token if one
   is available, else `false`. Use it to **drop** work on overload (HTTP 429,
@@ -142,10 +142,15 @@ first two; the underlying `*rate.Limiter` also offers `Reserve`.
   is cancelled/expired. Use it to **shape** work — a background job or client
   that should slow down rather than fail. Beware unbounded goroutine buildup if
   arrivals persistently exceed `r`; always pass a `ctx` with a deadline.
-- **`Reserve()` / `ReserveN()`** (on `*rate.Limiter`) — reserves a token and
-  tells you the `Delay()` until it becomes valid, without blocking. This is what
-  the middleware example uses to compute an accurate `Retry-After`. If you decide
-  not to proceed, call `reservation.Cancel()` to return the token.
+- **`Reserve() Reservation`** (via the optional `Reserver` interface) — reserves
+  a token and tells you the `Delay()` until it becomes valid, without blocking.
+  This is what the middleware example uses to compute an accurate `Retry-After`.
+  If you decide not to proceed, call `reservation.Cancel()` to return the token.
+  The default `RateLimiter` from `NewRateLimiterFunc` implements `Reserver` (it
+  wraps `*rate.Limiter`, whose richer `ReserveN`/`DelayFrom` API is still
+  reachable through the embedded field); a custom backend such as Redis/Valkey
+  can implement `Reserver` too, so middleware stays backend-agnostic. See
+  [docs/CUSTOM_STORAGE.md](CUSTOM_STORAGE.md#distributed-limiting-with-redis--valkey).
 
 ## Choosing parameters
 
