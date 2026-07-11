@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 )
 
@@ -26,9 +24,15 @@ func TestNewBucketLimiter(t *testing.T) {
 	bl := NewBucketLimiter(NewRateLimiterFunc(rate.Limit(10), 5), deleteAfter, storage)
 	t.Cleanup(func() { _ = bl.Close() })
 
-	require.NotNil(t, bl)
-	assert.Equal(t, deleteAfter, bl.deleteAfter)
-	assert.Same(t, storage, bl.storage)
+	if bl == nil {
+		t.Fatal("NewBucketLimiter returned nil")
+	}
+	if bl.deleteAfter != deleteAfter {
+		t.Errorf("deleteAfter = %v, want %v", bl.deleteAfter, deleteAfter)
+	}
+	if bl.storage != storage {
+		t.Error("storage field should be the exact instance passed in")
+	}
 }
 
 // TestBucketLimiter_PerKeyIsolation is the key regression test: distinct keys
@@ -41,9 +45,13 @@ func TestBucketLimiter_PerKeyIsolation(t *testing.T) {
 
 	a := bl.GetOrAdd("user-A")
 	for i := range 3 {
-		require.True(t, a.Allow(), "user-A request %d should be allowed", i+1)
+		if !a.Allow() {
+			t.Fatalf("user-A request %d should be allowed", i+1)
+		}
 	}
-	assert.False(t, a.Allow(), "user-A should be exhausted after its burst")
+	if a.Allow() {
+		t.Error("user-A should be exhausted after its burst")
+	}
 
 	// A completely separate key must still have a full, independent bucket.
 	b := bl.GetOrAdd("user-B")
@@ -53,7 +61,9 @@ func TestBucketLimiter_PerKeyIsolation(t *testing.T) {
 			allowed++
 		}
 	}
-	assert.Equal(t, 3, allowed, "user-B must have its own bucket independent of user-A")
+	if allowed != 3 {
+		t.Errorf("user-B must have its own bucket independent of user-A: allowed %d, want 3", allowed)
+	}
 }
 
 // TestBucketLimiter_GetOrAdd_New verifies a new key is created and stored.
@@ -63,11 +73,17 @@ func TestBucketLimiter_GetOrAdd_New(t *testing.T) {
 	t.Cleanup(func() { _ = bl.Close() })
 
 	limiter := bl.GetOrAdd("k")
-	require.NotNil(t, limiter)
+	if limiter == nil {
+		t.Fatal("GetOrAdd returned nil")
+	}
 
 	stored, ok := storage.Load("k")
-	assert.True(t, ok)
-	assert.Same(t, limiter, stored)
+	if !ok {
+		t.Fatal("new key should be stored")
+	}
+	if stored != limiter {
+		t.Error("stored limiter should be the same instance returned by GetOrAdd")
+	}
 }
 
 // TestBucketLimiter_GetOrAdd_Existing verifies the same instance is returned.
@@ -78,7 +94,9 @@ func TestBucketLimiter_GetOrAdd_Existing(t *testing.T) {
 
 	first := bl.GetOrAdd("k")
 	second := bl.GetOrAdd("k")
-	assert.Same(t, first, second, "existing key must return the same instance")
+	if first != second {
+		t.Error("existing key must return the same instance")
+	}
 }
 
 // TestBucketLimiter_EvictsIdle verifies idle keys are evicted, using a fake
@@ -101,16 +119,19 @@ func TestBucketLimiter_EvictsIdle(t *testing.T) {
 	t.Cleanup(func() { _ = bl.Close() })
 
 	bl.GetOrAdd("k")
-	_, ok := storage.Load("k")
-	require.True(t, ok, "key should be present right after creation")
+	if _, ok := storage.Load("k"); !ok {
+		t.Fatal("key should be present right after creation")
+	}
 
 	// Advance the clock well past the idle window; the sweeper must evict it.
 	nowNanos.Add(int64(2 * deleteAfter))
 
-	assert.Eventually(t, func() bool {
+	if !eventually(t, time.Second, 5*time.Millisecond, func() bool {
 		_, ok := storage.Load("k")
 		return !ok
-	}, time.Second, 5*time.Millisecond, "idle key should be evicted")
+	}) {
+		t.Error("idle key should be evicted")
+	}
 }
 
 // TestBucketLimiter_AccessKeepsAlive verifies that continued use prevents
@@ -139,8 +160,9 @@ func TestBucketLimiter_AccessKeepsAlive(t *testing.T) {
 		nowNanos.Add(int64(deleteAfter / 2))
 		bl.GetOrAdd("k")
 		time.Sleep(10 * time.Millisecond) // let the sweeper run at least once
-		_, ok := storage.Load("k")
-		require.True(t, ok, "actively-used key must not be evicted (iteration %d)", i)
+		if _, ok := storage.Load("k"); !ok {
+			t.Fatalf("actively-used key must not be evicted (iteration %d)", i)
+		}
 	}
 }
 
@@ -151,12 +173,14 @@ func TestBucketLimiter_Remove(t *testing.T) {
 	t.Cleanup(func() { _ = bl.Close() })
 
 	bl.GetOrAdd("k")
-	_, ok := storage.Load("k")
-	require.True(t, ok)
+	if _, ok := storage.Load("k"); !ok {
+		t.Fatal("key should be present after GetOrAdd")
+	}
 
 	bl.Remove("k")
-	_, ok = storage.Load("k")
-	assert.False(t, ok, "key should be gone after Remove")
+	if _, ok := storage.Load("k"); ok {
+		t.Error("key should be gone after Remove")
+	}
 }
 
 // TestBucketLimiter_Close verifies Close stops the sweeper and is idempotent.
@@ -164,11 +188,17 @@ func TestBucketLimiter_Close(t *testing.T) {
 	storage := newStorage()
 	bl := NewBucketLimiter(NewRateLimiterFunc(rate.Limit(10), 5), time.Second, storage)
 
-	require.NoError(t, bl.Close())
-	require.NoError(t, bl.Close(), "Close must be idempotent")
+	if err := bl.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if err := bl.Close(); err != nil {
+		t.Fatalf("Close must be idempotent, second call returned: %v", err)
+	}
 
 	// The manager still serves requests after Close.
-	assert.NotNil(t, bl.GetOrAdd("k"))
+	if bl.GetOrAdd("k") == nil {
+		t.Error("manager should still serve requests after Close")
+	}
 }
 
 // TestBucketLimiter_NoEvictionWhenDisabled verifies deleteAfter <= 0 keeps keys.
@@ -179,8 +209,9 @@ func TestBucketLimiter_NoEvictionWhenDisabled(t *testing.T) {
 
 	bl.GetOrAdd("k")
 	time.Sleep(50 * time.Millisecond)
-	_, ok := storage.Load("k")
-	assert.True(t, ok, "eviction disabled: key must remain")
+	if _, ok := storage.Load("k"); !ok {
+		t.Error("eviction disabled: key must remain")
+	}
 }
 
 // TestBucketLimiter_GetOrAdd_Concurrent verifies concurrent creation of the
@@ -203,9 +234,13 @@ func TestBucketLimiter_GetOrAdd_Concurrent(t *testing.T) {
 	wg.Wait()
 
 	stored, ok := storage.Load("concurrent-key")
-	require.True(t, ok)
+	if !ok {
+		t.Fatal("concurrent key should be stored")
+	}
 	for i, got := range results {
-		assert.Same(t, stored, got, "goroutine %d got a different instance", i)
+		if got != stored {
+			t.Errorf("goroutine %d got a different instance", i)
+		}
 	}
 }
 
@@ -225,7 +260,9 @@ func TestBucketLimiter_DistinctKeysConcurrent(t *testing.T) {
 			// Each key's first burst-worth of Allow() calls should all pass on
 			// its own fresh bucket.
 			lim := bl.GetOrAdd(key)
-			assert.True(t, lim.Allow(), "first request for %s should pass", key)
+			if !lim.Allow() {
+				t.Errorf("first request for %s should pass", key)
+			}
 		}()
 	}
 	wg.Wait()
@@ -244,14 +281,34 @@ func TestBucketLimiter_Wait(t *testing.T) {
 	const numRequests = 4
 	start := time.Now()
 	for range numRequests {
-		require.NoError(t, limiter.Wait(ctx))
+		if err := limiter.Wait(ctx); err != nil {
+			t.Fatalf("Wait returned error: %v", err)
+		}
 	}
 	elapsed := time.Since(start)
 
 	// Req 0 is immediate (burst), the next 3 wait ~0.5s each -> ~1.5s total.
 	// Use a lower bound only to avoid flakiness under race/CI scheduling.
-	assert.GreaterOrEqual(t, elapsed, 1200*time.Millisecond,
-		"Wait must shape traffic to roughly the configured rate")
+	if elapsed < 1200*time.Millisecond {
+		t.Errorf("Wait must shape traffic to roughly the configured rate: elapsed %v, want >= 1.2s", elapsed)
+	}
+}
+
+// eventually polls condition until it returns true or the timeout elapses. It
+// mirrors the small slice of testify's assert.Eventually the tests rely on,
+// without the dependency.
+func eventually(t *testing.T, timeout, interval time.Duration, condition func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if condition() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
 }
 
 // ExampleBucketLimiter demonstrates basic per-key usage.
