@@ -23,7 +23,7 @@ jobs:
 
       - name: Set up Go 1.x
         id: go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: ./go.mod
 
