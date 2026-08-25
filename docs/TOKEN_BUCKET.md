@@ -297,7 +297,7 @@ sequenceDiagram
 | Algorithm            | Bursts | Memory/key | Notes                                           |
 |----------------------|--------|------------|-------------------------------------------------|
 | **Token bucket**     | Yes    | O(1)       | This library. Smooth average + bounded burst.   |
-| Leaky bucket         | No     | O(1)       | Enforces a strictly constant output rate.       |
+| Leaky bucket         | No     | O(1)       | Enforces a strictly constant output rate. **Bundled** — see [LEAKY_BUCKET.md](LEAKY_BUCKET.md). |
 | Fixed window counter | Spiky  | O(1)       | Simple, but allows 2× burst at window edges.    |
 | Sliding window log   | Exact  | O(requests)| Precise but stores every timestamp.             |
 | Sliding window count | Good   | O(1)       | Approximates the log cheaply; common in Redis.  |
@@ -350,6 +350,7 @@ use `RateLimiter` (the token bucket) rather than `MemoryBackend`.
 
 - `golang.org/x/time/rate` package docs — <https://pkg.go.dev/golang.org/x/time/rate>
 - Token bucket — <https://en.wikipedia.org/wiki/Token_bucket>
+- [LEAKY_BUCKET.md](LEAKY_BUCKET.md) — the bundled leaky bucket, and when to prefer it
 - Leaky bucket — <https://en.wikipedia.org/wiki/Leaky_bucket>
 - IETF RateLimit header fields — <https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/>
 - RFC 9110 (HTTP semantics, `Retry-After`, `429`) — <https://www.rfc-editor.org/rfc/rfc9110>

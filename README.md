@@ -294,6 +294,47 @@ That is the whole seam for "shared budget when the datastore is there,
 in-process when it is not" — and the `Storage` stays the ordinary in-memory one
 in both branches, because it only caches handles.
 
+## Two strategies: token bucket and leaky bucket
+
+**Given the same parameters they behave identically** — they are duals, and any
+comparison implying otherwise has quietly changed the burst between the two
+sides. Measured with this package:
+
+```text
+token bucket, 10/s burst 1  → 1 admitted now, 1 more after 250ms
+leaky bucket, 100ms cap 1   → 1 admitted now, 1 more after 250ms
+```
+
+What differs is **how you say it**, and that is worth something:
+
+| | Token bucket | Leaky bucket |
+| --- | --- | --- |
+| Configured by | rate + burst | interval + capacity |
+| Natural default | absorbs a burst | paces |
+| Arithmetic | float tokens | exact integer durations (GCRA) |
+
+*"No more than 1000 an hour"* is a budget → token bucket. *"No more than one
+call every 100ms"* is a pace → leaky bucket, where strict pacing is the obvious
+configuration rather than a non-obvious `burst: 1`.
+
+Pick one by value, so it can come from a config file or a database column:
+
+```go
+strategy, err := ratelimiter.ParseStrategy("leaky_bucket") // or "token_bucket"
+limit := ratelimiter.Limit{Requests: 60, Period: time.Minute, Burst: 1}
+
+newLimiter, err := ratelimiter.NewLimiterFunc(strategy, limit)
+bl := ratelimiter.NewBucketLimiter(newLimiter, time.Minute, storage)
+```
+
+One `Limit` describes both; the strategy decides how it is enforced.
+`ParseStrategy` rejects an unrecognised value rather than defaulting — a typo
+that silently became `token_bucket` would admit bursts you specifically asked it
+not to.
+
+**[docs/TOKEN_BUCKET.md](docs/TOKEN_BUCKET.md)** and
+**[docs/LEAKY_BUCKET.md](docs/LEAKY_BUCKET.md)** are the full guides.
+
 ## Backends — one limit shared across processes
 
 `Storage` holds limiters **in this process**. `Backend` holds the **count**,

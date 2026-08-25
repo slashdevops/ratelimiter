@@ -196,7 +196,7 @@ The rule of thumb:
 | You want…                                            | Extension point            |
 |------------------------------------------------------|----------------------------|
 | A different **in-process** store (LRU, metrics, …)   | implement **`Storage`**    |
-| A different **algorithm** (leaky bucket, GCRA, …)    | implement **`Limiter`**    |
+| A different **algorithm** | implement **`Limiter`** — though token bucket and leaky bucket are both [bundled](LEAKY_BUCKET.md) |
 | A **global** limit shared across instances           | implement **[`Backend`](BACKENDS.md)** — `BackendLimiter` then supplies the `Limiter`, plus a local fallback, a circuit breaker and a degraded signal |
 
 Distributed limiting is a **`Limiter`** concern, not a `Storage` concern.
