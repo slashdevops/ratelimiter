@@ -182,10 +182,7 @@ func (b *MemoryBackend) Take(_ context.Context, key string, limit Limit, cost in
 
 	e.current += cost
 
-	remaining := limit.Requests - (int(weighted) + cost)
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := max(limit.Requests-(int(weighted)+cost), 0)
 
 	return Decision{Allowed: true, Remaining: remaining}, nil
 }
