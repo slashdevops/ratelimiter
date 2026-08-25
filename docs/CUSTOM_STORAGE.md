@@ -177,6 +177,10 @@ func TestLoadOrStoreAtomic(t *testing.T) {
 
 ## Storage is in-process — read this before reaching for Redis
 
+> **Looking for a limit shared across processes? You want
+> [`Backend`](BACKENDS.md), not `Storage`.** This section explains why, and the
+> rest of this page is about in-process containers.
+
 It is tempting to implement `Storage` on top of Redis or Valkey to get a
 *distributed* limit shared across instances. **That does not work, and it is a
 subtle footgun.** Here is why:
@@ -193,7 +197,7 @@ The rule of thumb:
 |------------------------------------------------------|----------------------------|
 | A different **in-process** store (LRU, metrics, …)   | implement **`Storage`**    |
 | A different **algorithm** (leaky bucket, GCRA, …)    | implement **`Limiter`**    |
-| A **global** limit shared across instances           | implement **`Limiter`** (backed by Redis/Valkey) |
+| A **global** limit shared across instances           | implement **[`Backend`](BACKENDS.md)** — `BackendLimiter` then supplies the `Limiter`, plus a local fallback, a circuit breaker and a degraded signal |
 
 Distributed limiting is a **`Limiter`** concern, not a `Storage` concern.
 
