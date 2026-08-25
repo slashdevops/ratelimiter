@@ -22,6 +22,16 @@
 //		// allowed
 //	}
 //
+// # Two strategies
+//
+// [StrategyTokenBucket] admits a burst and refills continuously;
+// [StrategyLeakyBucket] enforces a minimum spacing between admissions. Both can
+// be configured for "60 a minute" and they behave completely differently — 60
+// at once versus one per second — so the choice matters more than the numbers.
+// [NewLimiterFunc] selects one from a [Strategy] value, which is meant to
+// survive a round trip through configuration; [ParseStrategy] validates one
+// coming back. See docs/TOKEN_BUCKET.md and docs/LEAKY_BUCKET.md.
+//
 // Limiters are consumed through the [Limiter] interface (Allow, Wait, Burst).
 // A limiter may optionally also implement [Reserver] to reserve a token and
 // report the exact delay until it is valid; the default limiter from

@@ -46,3 +46,9 @@ var (
 	_ Reserver    = RateLimiter{}
 	_ Reservation = (*rate.Reservation)(nil)
 )
+
+// rateLimitOf converts a [Limit] into the tokens-per-second rate that
+// golang.org/x/time/rate expects.
+func rateLimitOf(l Limit) rate.Limit {
+	return rate.Limit(l.Rate())
+}
