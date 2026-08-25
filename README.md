@@ -268,8 +268,31 @@ go run ./examples/customstorage -cap 2
 **[docs/CUSTOM_STORAGE.md](docs/CUSTOM_STORAGE.md)** is a full guide: the method
 contracts, how to test atomicity, and — importantly — why a custom `Storage` is
 **in-process only**, plus the correct pattern for **distributed limiting with
-Redis / [Valkey](https://github.com/valkey-io/valkey-go)** (a datastore-backed
-`Limiter` wired through a `Storage` resolver, with the token-bucket Lua script).
+Redis / [Valkey](https://github.com/valkey-io/valkey-go)**: a datastore-backed
+`Limiter`, given its key by
+[`WithLimiterFactoryForKey`](#per-key-limiters-and-shared-backends).
+
+### Per-key limiters and shared backends
+
+A `Limiter` is bound to exactly one key — `Allow()` takes no arguments, so the
+instance *is* the bucket. `WithLimiterFactoryForKey` builds each one **from its
+key**, which is what a limiter needs when its counter lives somewhere else:
+
+```go
+bl := ratelimiter.NewBucketLimiter(nil, time.Minute,
+    ratelimiter.NewInMemoryStorage[string, ratelimiter.Limiter](),
+    ratelimiter.WithLimiterFactoryForKey(func(key string) ratelimiter.Limiter {
+        if shared != nil {
+            return sharedLimiter{client: shared, key: "rl:" + key}
+        }
+        return ratelimiter.RateLimiter{Limiter: rate.NewLimiter(limit, burst)}
+    }),
+)
+```
+
+That is the whole seam for "shared budget when the datastore is there,
+in-process when it is not" — and the `Storage` stays the ordinary in-memory one
+in both branches, because it only caches handles.
 
 ## Scope: single-process only
 

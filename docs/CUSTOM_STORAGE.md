@@ -34,8 +34,9 @@ to **hold the per-key limiters in memory**. Common reasons:
 - **Change the backing structure** — a sharded map to cut lock contention, a
   `weak`-pointer store, an arena, etc.
 - **Bind per-key metadata** — use the store as the seam that constructs
-  key-aware limiters (this is what the [Valkey pattern](#distributed-limiting-with-redis--valkey)
-  relies on).
+  key-aware limiters. Since `WithLimiterFactoryForKey` this is rarely the right
+  tool: that option gives a factory the key directly. See the
+  [Valkey pattern](#distributed-limiting-with-redis--valkey).
 
 If none of those apply, use `NewInMemoryStorage` — it is correct, atomic, and
 fast.
@@ -199,22 +200,47 @@ Distributed limiting is a **`Limiter`** concern, not a `Storage` concern.
 ## Distributed limiting with Redis / Valkey
 
 To share one budget across every instance, the *token math must run where the
-state lives* — in the datastore, via an atomic server-side script. So you
-implement the [`Limiter`](../limiter.go) interface (`Allow`, `Wait`, `Burst`)
-backed by [valkey-go](https://github.com/valkey-io/valkey-go), and you use a
-custom `Storage` as the **key→limiter resolver** so each limiter knows *its*
-Valkey key.
+state lives* — in the datastore, **atomically**. So you implement the
+[`Limiter`](../limiter.go) interface (`Allow`, `Wait`, `Burst`) backed by
+[valkey-go](https://github.com/valkey-io/valkey-go), and you give it its key
+with [`WithLimiterFactoryForKey`](#distributed-limiting-with-redis--valkey).
 
-> **Design note.** The `newLimiter func() Limiter` factory does not receive the
-> key, and `Allow()`/`Wait()` take no key argument — so one `Limiter` instance
-> represents exactly one key's bucket. The only injection point that sees both
-> the **key** and a place to hold a **shared client** is `Storage.LoadOrStore`.
-> That makes a custom `Storage` the natural seam: it caches one lightweight,
-> key-bound Valkey limiter per key. This uses the store as a factory/cache
-> rather than as a value container — a deliberate, supported reinterpretation
-> for this use case. (If you would rather not reuse `BucketLimiter` at all, a
-> ~30-line standalone manager over the same `valkeyLimiter` works too and keeps
-> `Storage` out of it entirely.)
+"Atomically" does not have to mean a server-side script. A token bucket is a
+read-modify-write — read `(tokens, ts)`, refill, compare, write — which is not
+one command, so it needs `EVAL` (below) or `WATCH`/`MULTI`/`EXEC`. If you would
+rather not run a script, **change the algorithm rather than the atomicity**: a
+sliding-window counter is a single atomic `INCR` plus a `PEXPIRE` on the first
+hit of each window, at the cost of stepwise rather than continuous refill and a
+small over-admission at a window boundary. Both are valid `Limiter`
+implementations; the library does not care which you pick.
+
+> **Use `WithLimiterFactoryForKey`.** A `Limiter` is bound to exactly one key —
+> `Allow()` and `Wait()` take no arguments, so the instance *is* the bucket — and
+> a datastore-backed limiter must know **which** remote key holds its counter.
+> `WithLimiterFactoryForKey(func(K) Limiter)` gives the factory the key:
+>
+> ```go
+> bl := ratelimiter.NewBucketLimiter(nil, time.Minute,
+>     ratelimiter.NewInMemoryStorage[string, ratelimiter.Limiter](),
+>     ratelimiter.WithLimiterFactoryForKey(func(key string) ratelimiter.Limiter {
+>         return valkeylimiter.New(client, "rl:"+key, limit, burst)
+>     }),
+> )
+> ```
+>
+> Note the storage in that example: the **ordinary in-memory one**. The shared
+> state lives in the datastore, inside the limiter; the map only caches one
+> lightweight handle per key. That is the division of labour — `Storage` holds
+> values in this process, `Limiter` decides, and only the `Limiter` knows where
+> its state lives.
+>
+> **Before this option existed** the only injection point that saw both the key
+> and a place to hold a shared client was `Storage.LoadOrStore`, so the store had
+> to be used as a factory/cache rather than as a value container. That still
+> works and is still supported, but it reinterprets an interface whose documented
+> job is to hold values, and it hides construction somewhere nobody looks for it.
+> Prefer the option. (If you would rather not reuse `BucketLimiter` at all, a
+> ~30-line standalone manager over the same `valkeyLimiter` works too.)
 
 ### The flow
 
