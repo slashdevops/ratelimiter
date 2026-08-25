@@ -9,6 +9,15 @@ mechanically.
 > constructing an independent limiter per key, which is the root of most of the
 > API changes below.
 
+> **Upgrading to the release that added `Backend`?** Nothing to do. That change
+> is purely additive: `WithLimiterFactoryForKey`, `Backend`, `MemoryBackend` and
+> `BackendLimiter` are new API, and every existing call — including
+> `NewBucketLimiter(newLimiter, d, storage)` and every `Option` — keeps working
+> unchanged. `Option` was deliberately **not** made generic for exactly this
+> reason: `Option[K]` would have forced every existing `WithClock(now)` call to
+> be explicitly instantiated. The guide below covers the earlier breaking
+> release.
+
 ## At a glance
 
 | Area                     | Before                                         | After                                                              |

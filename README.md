@@ -294,10 +294,58 @@ That is the whole seam for "shared budget when the datastore is there,
 in-process when it is not" — and the `Storage` stays the ordinary in-memory one
 in both branches, because it only caches handles.
 
+## Backends — one limit shared across processes
+
+`Storage` holds limiters **in this process**. `Backend` holds the **count**,
+wherever you want it: an in-process map, Valkey, Redis, DynamoDB, Postgres.
+
+```go
+type Backend interface {
+	Take(ctx context.Context, key string, limit Limit, cost int) (Decision, error)
+}
+```
+
+That is the whole interface. Implement it and every process shares one budget.
+
+```go
+backend := ratelimiter.NewMemoryBackend()   // or your own
+limit   := ratelimiter.Limit{Requests: 100, Period: time.Minute}
+
+bl := ratelimiter.NewBucketLimiter(nil, time.Minute,
+	ratelimiter.NewInMemoryStorage[string, ratelimiter.Limiter](),
+	ratelimiter.WithLimiterFactoryForKey(
+		ratelimiter.NewBackendLimiterFunc(backend, limit,
+			ratelimiter.WithFallback(local)),
+	),
+)
+```
+
+It is `Take`-shaped rather than `Get`/`Set`-shaped for a reason: a token bucket's
+update is a read-modify-write, and split across a network that is a race in
+which the limit silently becomes 2×. The decision has to run **where the state
+lives**, so the interface is the *decision*, not the storage.
+
+`BackendLimiter` adds the three things nobody should have to reimplement:
+
+- a **local fallback**, because neither refusing nor allowing is an acceptable
+  answer to "the datastore is down" on its own;
+- a **circuit breaker**, because falling back without one makes every request
+  during an outage pay a failed round trip first;
+- a **degraded signal**, because a limiter silently enforcing N× the intended
+  limit is invisible from a request.
+
+**[docs/BACKENDS.md](docs/BACKENDS.md)** is the full guide, including a ~25-line
+Valkey implementation. Runnable example:
+
+```bash
+go run ./examples/backend
+```
+
 ## Scope: single-process only
 
-Token state lives in memory inside each `*rate.Limiter`, so this library
-enforces limits **within one process**. Running N instances behind a load
+Token state lives in memory inside each `*rate.Limiter`, so the **default**
+limiter enforces limits **within one process**. Use a [`Backend`](#backends--one-limit-shared-across-processes)
+to share one budget across instances. Running N instances behind a load
 balancer yields an effective global limit of up to N × `limit`. Global,
 cross-instance limiting requires a distributed algorithm (e.g. a Redis script)
 and is out of scope. The `Storage` interface is for custom *in-process* stores,

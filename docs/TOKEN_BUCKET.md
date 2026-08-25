@@ -148,9 +148,10 @@ The same bucket can be consumed three ways. `ratelimiter.Limiter` exposes
   If you decide not to proceed, call `reservation.Cancel()` to return the token.
   The default `RateLimiter` from `NewRateLimiterFunc` implements `Reserver` (it
   wraps `*rate.Limiter`, whose richer `ReserveN`/`DelayFrom` API is still
-  reachable through the embedded field); a custom backend such as Redis/Valkey
-  can implement `Reserver` too, so middleware stays backend-agnostic. See
-  [docs/CUSTOM_STORAGE.md](CUSTOM_STORAGE.md#distributed-limiting-with-redis--valkey).
+  reachable through the embedded field); `BackendLimiter` implements `Reserver`
+  too, so middleware stays backend-agnostic. Note that a window counter cannot
+  hand a token back in a way that is distinguishable from spending one less, so
+  its `Cancel()` is a documented no-op — see [docs/BACKENDS.md](BACKENDS.md).
 
 ## Choosing parameters
 
@@ -307,15 +308,43 @@ fixed windows suffer from.
 
 ## Single-process vs. distributed
 
-This library limits within a **single process**: the token state lives in memory
-inside each `*rate.Limiter`. If you run N instances behind a load balancer, each
-enforces the limit independently, so the effective global limit is up to N·`r`.
+The **default** limiter limits within a single process: the token state lives in
+memory inside each `*rate.Limiter`. If you run N instances behind a load
+balancer, each enforces the limit independently, so the effective global limit
+is up to N·`r`.
 
-For a *global* limit shared across instances you need a distributed algorithm
-(commonly a sliding-window or token-bucket script in Redis, or a dedicated rate
-limiting service). That is deliberately out of scope here — the `Storage`
-interface exists to plug in custom **in-process** stores (e.g. a size-bounded
-LRU), not to synchronize token state across machines.
+For a *global* limit shared across instances, implement a
+[`Backend`](BACKENDS.md) — the count then lives wherever you put it, and every
+process shares one budget.
+
+> **The `Storage` interface is not the way to do that.** It exists to plug in
+> custom **in-process** containers (a size-bounded LRU, a metrics wrapper), not
+> to synchronise token state across machines. `GetOrAdd` hands the caller the
+> limiter and never writes it back, so a `Storage` that serialised state into a
+> datastore would hand out a full bucket on every request and never limit
+> anything. See [CUSTOM_STORAGE.md](CUSTOM_STORAGE.md).
+
+### The algorithm changes, and that is the honest part
+
+A distributed backend will usually be a **window counter**, because that is what
+can be done in one atomic command. A token bucket's update is a
+read-modify-write — read `(tokens, ts)`, refill, compare, write — which across a
+network needs either a transaction with a retry loop on a contended key, or a
+server-side script.
+
+So a shared limit does not behave identically to the in-process one:
+
+| | Token bucket (in-process) | Window counter (backend) |
+| --- | --- | --- |
+| Refill | continuous | stepwise |
+| Burst | exactly `b` | approximately `b`; over-admits slightly at a boundary |
+| `Retry-After` | exact, from the reservation | derived from the window edge |
+| Cost | none | one round trip |
+
+`MemoryBackend` is deliberately a window counter for this reason: it is the
+*same* algorithm a datastore backend runs, so switching between them does not
+move the behaviour underneath you. When you want the best in-process limiter,
+use `RateLimiter` (the token bucket) rather than `MemoryBackend`.
 
 ## Further reading
 

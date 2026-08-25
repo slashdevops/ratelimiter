@@ -59,11 +59,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # Add any setup steps before running the `github/codeql-action/init` action.
-      # This includes steps like installing compilers or runtimes (`actions/setup-node`
-      # or others). This is typically only required for manual builds.
-      # - name: Setup runtime (example)
-      #   uses: actions/setup-example@v1
+      # Install the Go version this module declares, BEFORE codeql-action/init.
+      #
+      # Without this the autobuilder uses whatever Go the runner happens to
+      # ship, with GOTOOLCHAIN=local — so it cannot download a newer one, and
+      # the whole analysis fails the moment go.mod's `go` directive moves ahead
+      # of the image:
+      #
+      #   go: go.mod requires go >= 1.27.0 (running go 1.26.6; GOTOOLCHAIN=local)
+      #   Extraction failed for all discovered Go projects.
+      #
+      # That is a failure of the workflow rather than of the code, and it
+      # reports as "We were unable to automatically build your code", which
+      # points nowhere near the cause. Pinning from go.mod means this job builds
+      # what the project declares, whatever the runner image is that week.
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ./go.mod
 
       # Initializes the CodeQL tools for scanning.
       - name: Initialize CodeQL
