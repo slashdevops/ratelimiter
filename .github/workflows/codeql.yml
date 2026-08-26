@@ -74,7 +74,7 @@ jobs:
       # points nowhere near the cause. Pinning from go.mod means this job builds
       # what the project declares, whatever the runner image is that week.
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: ./go.mod
 
